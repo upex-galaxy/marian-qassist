@@ -1,0 +1,1881 @@
+openapi: 3.0.3
+
+info:
+  title: QAssist API
+  version: 1.0.0
+  description: |
+    REST API for QAssist - Test Case Management and Jira Integration Platform.
+
+    ## Authentication
+    Most endpoints require JWT authentication via Bearer token in Authorization header.
+
+    ## Rate Limits
+    - Authenticated users: 100 requests/minute
+    - Public endpoints: 20 requests/minute per IP
+    - Jira sync: 10 syncs/hour per user
+  contact:
+    name: QAssist Support
+    email: support@qassist.io
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+  - url: https://staging.qassist.io
+    description: Staging environment
+  - url: https://api.qassist.io
+    description: Production environment
+
+tags:
+  - name: Authentication
+    description: User authentication and session management
+  - name: Users
+    description: User profile management
+  - name: Jira Integration
+    description: Jira OAuth connection and bidirectional sync
+  - name: Projects
+    description: Project and sprint management
+  - name: User Stories
+    description: User story management (imported from Jira)
+  - name: Test Cases
+    description: Test case CRUD and execution tracking
+  - name: Attachments
+    description: Evidence file upload and management
+  - name: Export
+    description: PDF, CSV, and ZIP export functionality
+  - name: Subscriptions
+    description: Stripe subscription management
+  - name: Webhooks
+    description: External webhook handlers
+
+paths:
+  # ============================================
+  # AUTHENTICATION ENDPOINTS
+  # ============================================
+
+  /api/auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Register new user
+      description: Create a new user account with email and password
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+                - consent_terms
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                  example: maya.chen@example.com
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$
+                  description: Must contain at least 1 uppercase, 1 lowercase, 1 number
+                  example: SecurePass123
+                consent_terms:
+                  type: boolean
+                  description: User must accept terms of service
+                  example: true
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  session_token:
+                    type: string
+                    description: JWT session token (expires in 7 days)
+        '400':
+          description: Validation error or email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                email_exists:
+                  value:
+                    error_code: EMAIL_EXISTS
+                    message: Email already registered
+                weak_password:
+                  value:
+                    error_code: WEAK_PASSWORD
+                    message: Password must contain at least 8 characters, 1 uppercase, 1 lowercase, 1 number
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Login with credentials
+      description: Authenticate user and return session token
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: maya.chen@example.com
+                password:
+                  type: string
+                  example: SecurePass123
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  session_token:
+                    type: string
+                    description: JWT session token
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Account suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: Logout user
+      description: Revoke session token and clear cookies
+      operationId: logoutUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Logout successful
+
+  /api/auth/password-reset:
+    post:
+      tags:
+        - Authentication
+      summary: Request password reset
+      description: Send password reset email with token
+      operationId: requestPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: maya.chen@example.com
+      responses:
+        '200':
+          description: If email exists, reset link sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: If email exists, reset link sent
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/password-reset/{token}:
+    put:
+      tags:
+        - Authentication
+      summary: Reset password with token
+      description: Validate reset token and update password
+      operationId: resetPassword
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - new_password
+              properties:
+                new_password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$
+      responses:
+        '200':
+          description: Password updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Password updated successfully
+        '400':
+          description: Invalid or expired token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ============================================
+  # USER PROFILE ENDPOINTS
+  # ============================================
+
+  /api/users/me:
+    get:
+      tags:
+        - Users
+      summary: Get current user profile
+      description: Retrieve authenticated user's profile
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags:
+        - Users
+      summary: Update user profile
+      description: Update name, email, or avatar
+      operationId: updateUserProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                email:
+                  type: string
+                  format: email
+                avatar:
+                  type: string
+                  format: binary
+                  description: Image file (JPEG/PNG, max 2MB)
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/onboarding:
+    get:
+      tags:
+        - Users
+      summary: Get onboarding progress
+      operationId: getOnboardingProgress
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Onboarding status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        title:
+                          type: string
+                        completed:
+                          type: boolean
+                        required:
+                          type: boolean
+                  progress_percentage:
+                    type: integer
+                    minimum: 0
+                    maximum: 100
+
+    put:
+      tags:
+        - Users
+      summary: Update onboarding step
+      operationId: updateOnboardingStep
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - step_id
+                - completed
+              properties:
+                step_id:
+                  type: string
+                completed:
+                  type: boolean
+      responses:
+        '200':
+          description: Step updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  progress_percentage:
+                    type: integer
+                  next_step:
+                    type: string
+
+  # ============================================
+  # JIRA INTEGRATION ENDPOINTS
+  # ============================================
+
+  /api/jira/connect:
+    post:
+      tags:
+        - Jira Integration
+      summary: Initiate Jira OAuth connection
+      description: Generate OAuth authorization URL for Jira
+      operationId: connectJira
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - jira_instance_url
+              properties:
+                jira_instance_url:
+                  type: string
+                  format: uri
+                  example: https://your-company.atlassian.net
+      responses:
+        '200':
+          description: Authorization URL generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorization_url:
+                    type: string
+                    format: uri
+                  state:
+                    type: string
+                    description: CSRF protection token
+        '400':
+          description: Invalid Jira URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jira/callback:
+    get:
+      tags:
+        - Jira Integration
+      summary: Handle Jira OAuth callback
+      description: Exchange authorization code for access token
+      operationId: jiraOAuthCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Connection successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jira_user:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      email:
+                        type: string
+                  accessible_projects_count:
+                    type: integer
+        '400':
+          description: OAuth failed or invalid state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jira/disconnect:
+    post:
+      tags:
+        - Jira Integration
+      summary: Disconnect Jira integration
+      operationId: disconnectJira
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Disconnected successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  /api/jira/projects:
+    get:
+      tags:
+        - Jira Integration
+      summary: List accessible Jira projects
+      operationId: listJiraProjects
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Projects list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        key:
+                          type: string
+                        name:
+                          type: string
+                        sprints_count:
+                          type: integer
+        '401':
+          description: Jira connection expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jira/import:
+    post:
+      tags:
+        - Jira Integration
+      summary: Import User Stories from Jira
+      description: One-click import of Jira issues
+      operationId: importJiraStories
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - jira_project_key
+              properties:
+                jira_project_key:
+                  type: string
+                  example: PROJ
+                sprint_id:
+                  type: number
+                  description: Optional - import specific sprint only
+      responses:
+        '200':
+          description: Import successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported_count:
+                    type: integer
+                  stories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserStory'
+        '403':
+          description: Insufficient Jira permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jira/sync:
+    post:
+      tags:
+        - Jira Integration
+      summary: Manual bidirectional sync
+      description: Trigger sync between QAssist and Jira
+      operationId: syncJira
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - project_id
+                - sync_direction
+              properties:
+                project_id:
+                  type: string
+                  format: uuid
+                sync_direction:
+                  type: string
+                  enum: [jira_to_qassist, qassist_to_jira, bidirectional]
+      responses:
+        '200':
+          description: Sync completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sync_summary:
+                    type: object
+                    properties:
+                      added:
+                        type: integer
+                      updated:
+                        type: integer
+                      deleted:
+                        type: integer
+                      conflicts:
+                        type: integer
+                  last_synced_at:
+                    type: string
+                    format: date-time
+        '409':
+          description: Sync conflicts detected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    type: string
+                    example: SYNC_CONFLICTS
+                  conflicts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        story_id:
+                          type: string
+                        issue:
+                          type: string
+
+  # ============================================
+  # PROJECTS ENDPOINTS
+  # ============================================
+
+  /api/projects:
+    get:
+      tags:
+        - Projects
+      summary: List user's projects
+      operationId: listProjects
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived]
+      responses:
+        '200':
+          description: Projects list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+
+    post:
+      tags:
+        - Projects
+      summary: Create new project
+      operationId: createProject
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                jira_project_key:
+                  type: string
+                  description: Optional - link to Jira project
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          description: Free tier limit reached (1 project max)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}:
+    get:
+      tags:
+        - Projects
+      summary: Get project details
+      operationId: getProject
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags:
+        - Projects
+      summary: Update project
+      operationId: updateProject
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                status:
+                  type: string
+                  enum: [active, archived]
+      responses:
+        '200':
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+
+    delete:
+      tags:
+        - Projects
+      summary: Delete project
+      operationId: deleteProject
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Project deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================
+  # USER STORIES ENDPOINTS
+  # ============================================
+
+  /api/user-stories:
+    get:
+      tags:
+        - User Stories
+      summary: List User Stories
+      operationId: listUserStories
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: sprint_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [todo, in_progress, done]
+      responses:
+        '200':
+          description: User Stories list (grouped by sprint)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sprints:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        status:
+                          type: string
+                        stories:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/UserStory'
+
+  /api/user-stories/{id}:
+    get:
+      tags:
+        - User Stories
+      summary: Get User Story details
+      operationId: getUserStory
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User Story details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserStory'
+
+    put:
+      tags:
+        - User Stories
+      summary: Update User Story
+      description: Updates local User Story (does not sync to Jira)
+      operationId: updateUserStory
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                status:
+                  type: string
+      responses:
+        '200':
+          description: User Story updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserStory'
+
+  # ============================================
+  # TEST CASES ENDPOINTS
+  # ============================================
+
+  /api/test-cases:
+    get:
+      tags:
+        - Test Cases
+      summary: List Test Cases
+      operationId: listTestCases
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: user_story_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, pass, fail, blocked, not_executed]
+      responses:
+        '200':
+          description: Test Cases list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test_cases:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TestCase'
+
+    post:
+      tags:
+        - Test Cases
+      summary: Create Test Case
+      operationId: createTestCase
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_story_id
+                - title
+              properties:
+                user_story_id:
+                  type: string
+                  format: uuid
+                title:
+                  type: string
+                  maxLength: 200
+                content:
+                  type: string
+                  description: HTML content (sanitized)
+                template_id:
+                  type: string
+                  enum: [blank, smoke, regression, edge_cases]
+      responses:
+        '201':
+          description: Test Case created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCase'
+        '400':
+          description: Free tier limit reached (50 Test Cases max)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/test-cases/{id}:
+    get:
+      tags:
+        - Test Cases
+      summary: Get Test Case details
+      operationId: getTestCase
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Test Case details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCase'
+
+    put:
+      tags:
+        - Test Cases
+      summary: Update Test Case
+      operationId: updateTestCase
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                content:
+                  type: string
+                  description: HTML content (sanitized)
+      responses:
+        '200':
+          description: Test Case updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCase'
+
+    delete:
+      tags:
+        - Test Cases
+      summary: Delete Test Case
+      operationId: deleteTestCase
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Test Case deleted
+
+  /api/test-cases/{id}/execute:
+    post:
+      tags:
+        - Test Cases
+      summary: Execute Test Case
+      description: Mark Test Case as executed with result
+      operationId: executeTestCase
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - result
+              properties:
+                result:
+                  type: string
+                  enum: [pass, fail, blocked]
+                execution_notes:
+                  type: string
+                  maxLength: 1000
+                  description: Required for fail/blocked results
+                duration_seconds:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: Execution recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test_case:
+                    $ref: '#/components/schemas/TestCase'
+                  execution:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      result:
+                        type: string
+                      executed_at:
+                        type: string
+                        format: date-time
+        '400':
+          description: Execution notes required for failed/blocked tests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/test-cases/search:
+    get:
+      tags:
+        - Test Cases
+      summary: Search Test Cases
+      description: Full-text search across title and content
+      operationId: searchTestCases
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        title:
+                          type: string
+                        snippet:
+                          type: string
+                          description: Matching text with highlights
+                        status:
+                          type: string
+                        last_executed:
+                          type: string
+                          format: date-time
+                  total_count:
+                    type: integer
+
+  # ============================================
+  # ATTACHMENTS ENDPOINTS
+  # ============================================
+
+  /api/attachments:
+    post:
+      tags:
+        - Attachments
+      summary: Upload evidence file
+      description: Upload screenshot or video to Test Case
+      operationId: uploadAttachment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - test_case_id
+                - file
+              properties:
+                test_case_id:
+                  type: string
+                  format: uuid
+                file:
+                  type: string
+                  format: binary
+                  description: Image (JPEG/PNG/GIF/WebP, max 10MB) or Video (MP4/WebM/MOV, max 50MB)
+      responses:
+        '201':
+          description: File uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+        '400':
+          description: Invalid file type or size
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Storage limit exceeded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    type: string
+                    example: STORAGE_LIMIT_EXCEEDED
+                  message:
+                    type: string
+                  current_usage:
+                    type: integer
+                  limit:
+                    type: integer
+                  upgrade_url:
+                    type: string
+
+  /api/attachments/{id}:
+    get:
+      tags:
+        - Attachments
+      summary: Get attachment metadata
+      operationId: getAttachment
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Attachment metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+
+    delete:
+      tags:
+        - Attachments
+      summary: Delete attachment
+      operationId: deleteAttachment
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Attachment deleted
+
+  /api/attachments/storage-usage:
+    get:
+      tags:
+        - Attachments
+      summary: Get storage usage stats
+      operationId: getStorageUsage
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Storage usage breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  used_bytes:
+                    type: integer
+                  limit_bytes:
+                    type: integer
+                  usage_percentage:
+                    type: number
+                    format: float
+                  breakdown:
+                    type: object
+                    properties:
+                      screenshots:
+                        type: integer
+                      videos:
+                        type: integer
+
+  # ============================================
+  # EXPORT ENDPOINTS
+  # ============================================
+
+  /api/export/pdf:
+    post:
+      tags:
+        - Export
+      summary: Export Test Cases to PDF
+      operationId: exportPDF
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - test_case_ids
+              properties:
+                test_case_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: Use "all" string to export all Test Cases in project
+                include_evidence:
+                  type: boolean
+                  default: true
+                include_execution_history:
+                  type: boolean
+                  default: false
+                page_orientation:
+                  type: string
+                  enum: [portrait, landscape]
+                  default: portrait
+      responses:
+        '200':
+          description: PDF generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pdf_url:
+                    type: string
+                    format: uri
+                    description: Download URL (expires in 1 hour)
+                  file_size:
+                    type: integer
+                  page_count:
+                    type: integer
+        '400':
+          description: No Test Cases found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/export/csv:
+    post:
+      tags:
+        - Export
+      summary: Export Test Cases to CSV
+      operationId: exportCSV
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - test_case_ids
+              properties:
+                test_case_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                format:
+                  type: string
+                  enum: [csv, excel]
+                  default: csv
+      responses:
+        '200':
+          description: CSV/Excel file generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  download_url:
+                    type: string
+                    format: uri
+                  file_size:
+                    type: integer
+                  format:
+                    type: string
+
+  /api/export/zip:
+    post:
+      tags:
+        - Export
+      summary: Export entire project as ZIP
+      description: Full project backup with all data
+      operationId: exportZIP
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - project_id
+              properties:
+                project_id:
+                  type: string
+                  format: uuid
+                include_evidence:
+                  type: boolean
+                  default: true
+                include_metadata:
+                  type: boolean
+                  default: true
+                format:
+                  type: string
+                  enum: [html, pdf]
+                  default: html
+                  description: Test Case export format
+      responses:
+        '200':
+          description: ZIP file generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  download_url:
+                    type: string
+                    format: uri
+                  file_size:
+                    type: integer
+                  expires_at:
+                    type: string
+                    format: date-time
+
+  # ============================================
+  # SUBSCRIPTIONS ENDPOINTS
+  # ============================================
+
+  /api/subscriptions/checkout:
+    post:
+      tags:
+        - Subscriptions
+      summary: Create Stripe checkout session
+      description: Initiate Pro subscription upgrade
+      operationId: createCheckoutSession
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - plan
+              properties:
+                plan:
+                  type: string
+                  enum: [pro_monthly, pro_yearly]
+      responses:
+        '200':
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checkout_url:
+                    type: string
+                    format: uri
+                    description: Redirect user to this Stripe URL
+                  session_id:
+                    type: string
+
+  /api/subscriptions/current:
+    get:
+      tags:
+        - Subscriptions
+      summary: Get current subscription
+      operationId: getCurrentSubscription
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Subscription details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /api/subscriptions/cancel:
+    post:
+      tags:
+        - Subscriptions
+      summary: Cancel subscription
+      description: Cancel at end of billing period (no refund)
+      operationId: cancelSubscription
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Cancellation scheduled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  effective_date:
+                    type: string
+                    format: date-time
+
+  /api/subscriptions/portal:
+    get:
+      tags:
+        - Subscriptions
+      summary: Get Stripe customer portal URL
+      description: Redirect to Stripe portal for payment method updates
+      operationId: getCustomerPortal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Portal URL generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  portal_url:
+                    type: string
+                    format: uri
+
+  # ============================================
+  # WEBHOOKS
+  # ============================================
+
+  /api/webhooks/stripe:
+    post:
+      tags:
+        - Webhooks
+      summary: Stripe webhook handler
+      description: Receive Stripe events (subscription updates, payments)
+      operationId: stripeWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Stripe event payload
+      responses:
+        '200':
+          description: Event processed
+        '400':
+          description: Invalid signature
+
+# ============================================
+# REUSABLE COMPONENTS
+# ============================================
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (expires in 1 hour)
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        avatar_url:
+          type: string
+          format: uri
+        subscription_tier:
+          type: string
+          enum: [free, pro]
+        storage_used_bytes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        last_login_at:
+          type: string
+          format: date-time
+
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        jira_project_id:
+          type: string
+        jira_project_key:
+          type: string
+        status:
+          type: string
+          enum: [active, archived]
+        test_case_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        archived_at:
+          type: string
+          format: date-time
+
+    UserStory:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        sprint_id:
+          type: string
+          format: uuid
+        jira_issue_key:
+          type: string
+          example: PROJ-123
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [todo, in_progress, done]
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+        test_case_count:
+          type: integer
+        last_synced_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    TestCase:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        user_story_id:
+          type: string
+          format: uuid
+        test_case_number:
+          type: string
+          example: TC-001
+        title:
+          type: string
+        content:
+          type: string
+          description: HTML content (sanitized)
+        status:
+          type: string
+          enum: [draft, pass, fail, blocked, not_executed]
+        template_used:
+          type: string
+        local_file_path:
+          type: string
+        attachment_count:
+          type: integer
+        last_executed_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Attachment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        test_case_id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        file_path:
+          type: string
+          description: Local file path (relative)
+        storage_url:
+          type: string
+          format: uri
+          description: Cloud storage URL
+        thumbnail_url:
+          type: string
+          format: uri
+        file_type:
+          type: string
+          enum: [image, video]
+        file_size_bytes:
+          type: integer
+        uploaded_at:
+          type: string
+          format: date-time
+
+    Subscription:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        stripe_customer_id:
+          type: string
+        stripe_subscription_id:
+          type: string
+        plan:
+          type: string
+          enum: [pro_monthly, pro_yearly]
+        status:
+          type: string
+          enum: [active, past_due, canceled, incomplete]
+        current_period_start:
+          type: string
+          format: date-time
+        current_period_end:
+          type: string
+          format: date-time
+        cancel_at_period_end:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required:
+        - error_code
+        - message
+      properties:
+        error_code:
+          type: string
+          description: Machine-readable error code
+          example: EMAIL_EXISTS
+        message:
+          type: string
+          description: Human-readable error message
+          example: Email already registered
+        details:
+          type: object
+          description: Additional error context
+          additionalProperties: true
+
+  responses:
+    Unauthorized:
+      description: Authentication required or token expired
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_code: UNAUTHORIZED
+            message: Authentication required
+
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_code: FORBIDDEN
+            message: You do not have permission to access this resource
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_code: NOT_FOUND
+            message: Resource not found
+
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_code: INTERNAL_ERROR
+            message: An unexpected error occurred
+
+security:
+  - bearerAuth: []
